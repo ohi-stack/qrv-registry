@@ -1,55 +1,80 @@
-import express from "express";
-import pkg from "pg";
-import dotenv from "dotenv";
+import express from 'express'
+import helmet from 'helmet'
+import cors from 'cors'
+import morgan from 'morgan'
+import dotenv from 'dotenv'
+import pkg from 'pg'
+import crypto from 'crypto'
 
-dotenv.config();
+dotenv.config()
+const { Pool } = pkg
 
-const { Pool } = pkg;
-const app = express();
+const app = express()
+app.use(express.json())
+app.use(helmet())
+app.use(cors())
+app.use(morgan('combined'))
 
-app.use(express.json());
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const PORT = process.env.PORT || 4000
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+function generateQRVID() {
+  const ts = Date.now().toString(36)
+  const rand = Math.random().toString(36).substring(2, 8)
+  return `QRV-${ts}-${rand}`.toUpperCase()
+}
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", service: "registry" });
-});
+function hashPayload(payload) {
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+}
 
-app.post("/registry/create", async (req, res) => {
+async function audit(qrvid, event, metadata) {
+  await pool.query(
+    `INSERT INTO qr_audit_log (qrvid, event_type, metadata) VALUES ($1,$2,$3)`,
+    [qrvid, event, metadata]
+  )
+}
+
+app.get('/health', (_, res) => res.json({ status: 'ok' }))
+app.get('/ready', async (_, res) => {
   try {
-    const { qrvid, issuer, owner, record_type } = req.body;
-
-    const result = await pool.query(
-      `INSERT INTO qr_certificates (qrvid, issuer, owner, record_type)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [qrvid, issuer, owner, record_type]
-    );
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    await pool.query('SELECT 1')
+    res.json({ status: 'ready' })
+  } catch {
+    res.status(500).json({ status: 'not_ready' })
   }
-});
+})
 
-app.get("/registry/:qrvid", async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT * FROM qr_certificates WHERE qrvid = $1`,
-      [req.params.qrvid]
-    );
+app.post('/registry/create', async (req, res) => {
+  const { type, issuer, owner, payload } = req.body
+  if (!type || !issuer) return res.status(400).json({ error: 'missing fields' })
 
-    if (!result.rows.length) {
-      return res.status(404).json({ error: "Not found" });
-    }
+  const qrvid = generateQRVID()
+  const hash = hashPayload(payload || {})
 
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  await pool.query(
+    `INSERT INTO qr_objects (qrvid, record_type, issuer, owner, hash) VALUES ($1,$2,$3,$4,$5)`,
+    [qrvid, type, issuer, owner || null, hash]
+  )
 
-app.listen(3000, () => {
-  console.log("Registry running on port 3000");
-});
+  await audit(qrvid, 'create', { issuer, type })
+  res.json({ qrvid, hash })
+})
+
+app.get('/registry/:qrvid', async (req, res) => {
+  const { qrvid } = req.params
+  const r = await pool.query(`SELECT * FROM qr_objects WHERE qrvid=$1`, [qrvid])
+  if (!r.rows.length) return res.status(404).json({ error: 'not found' })
+
+  await audit(qrvid, 'lookup', {})
+  res.json(r.rows[0])
+})
+
+app.post('/registry/:qrvid/revoke', async (req, res) => {
+  const { qrvid } = req.params
+  await pool.query(`UPDATE qr_objects SET status='revoked' WHERE qrvid=$1`, [qrvid])
+  await audit(qrvid, 'revoke', {})
+  res.json({ status: 'revoked' })
+})
+
+app.listen(PORT, () => console.log(`Registry running on ${PORT}`))
