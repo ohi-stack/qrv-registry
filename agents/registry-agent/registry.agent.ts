@@ -1,5 +1,6 @@
 import pkg from 'pg'
 import crypto from 'crypto'
+import { triggerWebhookEvent } from '../../api/controllers/webhook.controller.js'
 
 const { Pool } = pkg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
@@ -42,6 +43,13 @@ export const registryAgent = {
         )
 
         await logAudit(qrvid, 'record.created', { issuer, recordType })
+
+        await triggerWebhookEvent('record.created', {
+          qrvid,
+          issuer,
+          recordType,
+          hash
+        })
 
         return {
           status: 'VERIFIED',
@@ -90,6 +98,12 @@ export const registryAgent = {
         }
 
         await logAudit(qrvid, 'record.revoked', { reason: reason || null })
+
+        await triggerWebhookEvent('record.revoked', {
+          qrvid,
+          reason: reason || null
+        })
+
         return {
           status: 'REVOKED',
           qrvid,
