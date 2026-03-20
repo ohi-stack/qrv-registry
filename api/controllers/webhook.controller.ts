@@ -1,3 +1,5 @@
+import { deliverWebhook } from './webhook.delivery.js'
+
 const webhookStore = new Map()
 
 function generateWebhookId() {
@@ -35,32 +37,17 @@ export async function listWebhooks(req, res, next) {
 }
 
 export async function triggerWebhookEvent(eventName, payload) {
-  const matches = Array.from(webhookStore.values()).filter(webhook => webhook.isActive && webhook.events.includes(eventName))
-
-  const deliveries = await Promise.allSettled(
-    matches.map(async webhook => {
-      const response = await fetch(webhook.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: eventName, payload, timestamp: new Date().toISOString() })
-      })
-
-      return {
-        webhookId: webhook.id,
-        url: webhook.url,
-        delivered: response.ok,
-        statusCode: response.status
-      }
-    })
+  const matches = Array.from(webhookStore.values()).filter(
+    webhook => webhook.isActive && webhook.events.includes(eventName)
   )
 
-  return deliveries.map((result, index) => {
-    if (result.status === 'fulfilled') return result.value
-    return {
-      webhookId: matches[index]?.id || null,
-      url: matches[index]?.url || null,
-      delivered: false,
-      error: result.reason?.message || 'delivery_failed'
-    }
+  matches.forEach(webhook => {
+    deliverWebhook(webhook, eventName, payload)
   })
+
+  return matches.map(webhook => ({
+    webhookId: webhook.id,
+    url: webhook.url,
+    queued: true
+  }))
 }
