@@ -1,4 +1,4 @@
-import { deliverWebhook } from './webhook.delivery.js'
+import { enqueueWebhookJob } from '../../services/redis-queue.service.js'
 
 const webhookStore = new Map()
 
@@ -41,9 +41,13 @@ export async function triggerWebhookEvent(eventName, payload) {
     webhook => webhook.isActive && webhook.events.includes(eventName)
   )
 
-  matches.forEach(webhook => {
-    deliverWebhook(webhook, eventName, payload)
-  })
+  for (const webhook of matches) {
+    await enqueueWebhookJob({
+      webhook,
+      eventName,
+      payload
+    })
+  }
 
   return matches.map(webhook => ({
     webhookId: webhook.id,
