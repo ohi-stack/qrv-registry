@@ -15,9 +15,15 @@ app.use(helmet())
 app.use(cors())
 app.use(morgan('combined'))
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+// ===== DATABASE =====
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+})
+
+// ===== PORT =====
 const PORT = process.env.PORT || 4000
 
+// ===== UTIL FUNCTIONS =====
 function generateQRVID() {
   const ts = Date.now().toString(36)
   const rand = Math.random().toString(36).substring(2, 8)
@@ -25,56 +31,118 @@ function generateQRVID() {
 }
 
 function hashPayload(payload) {
-  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload))
+    .digest('hex')
 }
 
 async function audit(qrvid, event, metadata) {
-  await pool.query(
-    `INSERT INTO qr_audit_log (qrvid, event_type, metadata) VALUES ($1,$2,$3)`,
-    [qrvid, event, metadata]
-  )
+  try {
+    await pool.query(
+      `INSERT INTO qr_audit_log (qrvid, event_type, metadata)
+       VALUES ($1,$2,$3)`,
+      [qrvid, event, metadata]
+    )
+  } catch (err) {
+    console.error('Audit log failed:', err.message)
+  }
 }
 
-app.get('/health', (_, res) => res.json({ status: 'ok' }))
+// ===== BASIC ROUTES (TESTING) =====
+app.get('/', (req, res) => {
+  res.send('QRV Registry API is running')
+})
+
+app.get('/health', (_, res) => {
+  res.json({ status: 'ok' })
+})
+
 app.get('/ready', async (_, res) => {
   try {
     await pool.query('SELECT 1')
     res.json({ status: 'ready' })
-  } catch {
-    res.status(500).json({ status: 'not_ready' })
+  } catch (err) {
+    res.status(500).json({ status: 'not_ready', error: err.message })
   }
 })
 
+app.get('/verify', (req, res) => {
+  res.json({ status: 'verify endpoint working' })
+})
+
+// ===== REGISTRY CORE =====
+
+// CREATE
 app.post('/registry/create', async (req, res) => {
-  const { type, issuer, owner, payload } = req.body
-  if (!type || !issuer) return res.status(400).json({ error: 'missing fields' })
+  try {
+    const { type, issuer, owner, payload } = req.body
 
-  const qrvid = generateQRVID()
-  const hash = hashPayload(payload || {})
+    if (!type || !issuer) {
+      return res.status(400).json({ error: 'missing fields' })
+    }
 
-  await pool.query(
-    `INSERT INTO qr_objects (qrvid, record_type, issuer, owner, hash) VALUES ($1,$2,$3,$4,$5)`,
-    [qrvid, type, issuer, owner || null, hash]
-  )
+    const qrvid = generateQRVID()
+    const hash = hashPayload(payload || {})
 
-  await audit(qrvid, 'create', { issuer, type })
-  res.json({ qrvid, hash })
+    await pool.query(
+      `INSERT INTO qr_objects (qrvid, record_type, issuer, owner, hash)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [qrvid, type, issuer, owner || null, hash]
+    )
+
+    await audit(qrvid, 'create', { issuer, type })
+
+    res.json({ qrvid, hash })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'create failed' })
+  }
 })
 
+// READ / VERIFY
 app.get('/registry/:qrvid', async (req, res) => {
-  const { qrvid } = req.params
-  const r = await pool.query(`SELECT * FROM qr_objects WHERE qrvid=$1`, [qrvid])
-  if (!r.rows.length) return res.status(404).json({ error: 'not found' })
+  try {
+    const { qrvid } = req.params
 
-  await audit(qrvid, 'lookup', {})
-  res.json(r.rows[0])
+    const r = await pool.query(
+      `SELECT * FROM qr_objects WHERE qrvid=$1`,
+      [qrvid]
+    )
+
+    if (!r.rows.length) {
+      return res.status(404).json({ error: 'not found' })
+    }
+
+    await audit(qrvid, 'lookup', {})
+
+    res.json(r.rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'lookup failed' })
+  }
 })
 
+// REVOKE
 app.post('/registry/:qrvid/revoke', async (req, res) => {
-  const { qrvid } = req.params
-  await pool.query(`UPDATE qr_objects SET status='revoked' WHERE qrvid=$1`, [qrvid])
-  await audit(qrvid, 'revoke', {})
-  res.json({ status: 'revoked' })
+  try {
+    const { qrvid } = req.params
+
+    await pool.query(
+      `UPDATE qr_objects SET status='revoked' WHERE qrvid=$1`,
+      [qrvid]
+    )
+
+    await audit(qrvid, 'revoke', {})
+
+    res.json({ status: 'revoked' })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'revoke failed' })
+  }
 })
 
-app.listen(PORT, () => console.log(`Registry running on ${PORT}`))
+// ===== START SERVER =====
+app.listen(PORT, () => {
+  console.log(`Registry running on port ${PORT}`)
+})
