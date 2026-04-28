@@ -1,15 +1,16 @@
 import express from 'express';
+import crypto from 'crypto';
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = process.env.APP_VERSION || '1.1.1';
+const VERSION = process.env.APP_VERSION || '1.2.0';
 const VERIFY_BASE_URL = process.env.VERIFY_BASE_URL || 'https://verify.qrv.network';
 const STARTED_AT = new Date().toISOString();
 
-const demoRecords = new Map([
+const registryRecords = new Map([
   ['QRV-DEMO-001', {
     qrvid: 'QRV-DEMO-001',
     status: 'VERIFIED',
@@ -91,70 +92,80 @@ function canonicalUrl(qrvid) {
   return `${VERIFY_BASE_URL}/${encodeURIComponent(qrvid)}`;
 }
 
+function createQrvid() {
+  return `QRV-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+function hashRecord(record) {
+  return `SHA256:${crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex').toUpperCase()}`;
+}
+
 function verifyPayload(qrvidRaw) {
   const qrvid = normalizeQrvid(qrvidRaw);
   const checkedAt = new Date().toISOString();
 
   if (!QRVID_FORMAT.test(qrvid)) {
-    return {
-      statusCode: 422,
-      body: {
-        ok: false,
-        verified: false,
-        service: 'qrv-registry',
-        qrvid,
-        state: 'INVALID_FORMAT',
-        status: 'INVALID_FORMAT',
-        message: 'QRVID format is invalid.',
-        checkedAt
-      }
-    };
+    return { statusCode: 422, body: { ok: false, verified: false, service: 'qrv-registry', qrvid, state: 'INVALID_FORMAT', status: 'INVALID_FORMAT', message: 'QRVID format is invalid.', checkedAt } };
   }
 
-  const record = demoRecords.get(qrvid);
+  const record = registryRecords.get(qrvid);
   if (!record) {
-    return {
-      statusCode: 404,
-      body: {
-        ok: false,
-        verified: false,
-        service: 'qrv-registry',
-        qrvid,
-        state: 'NOT_FOUND',
-        status: 'NOT_FOUND',
-        message: 'No registry record was found for this QRVID.',
-        canonicalUrl: canonicalUrl(qrvid),
-        checkedAt
-      }
-    };
+    return { statusCode: 404, body: { ok: false, verified: false, service: 'qrv-registry', qrvid, state: 'NOT_FOUND', status: 'NOT_FOUND', message: 'No registry record was found for this QRVID.', canonicalUrl: canonicalUrl(qrvid), checkedAt } };
   }
 
   const isVerified = record.state === 'VERIFIED';
-  return {
-    statusCode: 200,
-    body: {
-      ok: isVerified,
-      verified: isVerified,
-      service: 'qrv-registry',
-      ...record,
-      canonicalUrl: canonicalUrl(qrvid),
-      checkedAt
-    }
+  return { statusCode: 200, body: { ok: isVerified, verified: isVerified, service: 'qrv-registry', ...record, canonicalUrl: canonicalUrl(qrvid), checkedAt } };
+}
+
+function sanitizeText(value, fallback = '') {
+  return String(value || fallback).trim().slice(0, 500);
+}
+
+function createRecord(payload) {
+  const now = new Date().toISOString();
+  const requestedQrvid = normalizeQrvid(payload.qrvid || '');
+  const qrvid = requestedQrvid && QRVID_FORMAT.test(requestedQrvid) ? requestedQrvid : createQrvid();
+
+  const record = {
+    qrvid,
+    status: 'VERIFIED',
+    state: 'VERIFIED',
+    recordType: sanitizeText(payload.recordType || payload.type, 'Certificate'),
+    title: sanitizeText(payload.title || payload.assetName, 'Untitled QR-V Record'),
+    subject: sanitizeText(payload.subject || payload.holder || payload.owner, 'Not provided'),
+    issuer: sanitizeText(payload.issuer || payload.issuerName, 'QR-V Issuer'),
+    description: sanitizeText(payload.description, ''),
+    issuedAt: now,
+    expiresAt: payload.expiresAt || null,
+    visibility: payload.visibility || 'public'
   };
+
+  record.hash = hashRecord(record);
+  registryRecords.set(qrvid, record);
+  return record;
 }
 
 app.get('/', (_req, res) => {
-  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QR-V Registry Service</title><style>body{font-family:Inter,Arial,sans-serif;background:#fff;color:#0f172a;margin:0}.wrap{max-width:760px;margin:14vh auto;padding:32px;border:1px solid #dbe3ef;border-radius:24px}h1{font-size:clamp(42px,8vw,72px);line-height:1.04}.k{font-weight:800}code{background:#f1f5f9;padding:4px 8px;border-radius:8px}</style></head><body><main class="wrap"><h1>QR-V Registry Service</h1><p><span class="k">Status:</span> Running</p><p><span class="k">Service:</span> qrv-registry</p><p><span class="k">Version:</span> ${VERSION}</p><p><span class="k">Started:</span> ${STARTED_AT}</p><p>This is the registry API for QR-V verification records. Public verification should resolve through <code>verify.qrv.network</code>.</p><p>Health: <code>/health</code> · Readiness: <code>/ready</code> · Version: <code>/version</code> · Verify: <code>/verify/QRV-DEMO-001</code></p></main></body></html>`);
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QR-V Registry Service</title><style>body{font-family:Inter,Arial,sans-serif;background:#fff;color:#0f172a;margin:0}.wrap{max-width:760px;margin:14vh auto;padding:32px;border:1px solid #dbe3ef;border-radius:24px}h1{font-size:clamp(42px,8vw,72px);line-height:1.04}.k{font-weight:800}code{background:#f1f5f9;padding:4px 8px;border-radius:8px}</style></head><body><main class="wrap"><h1>QR-V Registry Service</h1><p><span class="k">Status:</span> Running</p><p><span class="k">Service:</span> qrv-registry</p><p><span class="k">Version:</span> ${VERSION}</p><p><span class="k">Started:</span> ${STARTED_AT}</p><p>This is the registry API for QR-V verification records. Public verification should resolve through <code>verify.qrv.network</code>.</p><p>Health: <code>/health</code> · Readiness: <code>/ready</code> · Version: <code>/version</code> · Verify: <code>/verify/QRV-DEMO-001</code> · Create: <code>POST /records</code></p></main></body></html>`);
 });
 
 app.get('/health', (_req, res) => res.json({ ok: true, status: 'ok', service: 'qrv-registry', version: VERSION }));
 app.get('/healthz', (_req, res) => res.json({ ok: true, status: 'ok', service: 'qrv-registry', version: VERSION }));
-app.get('/ready', (_req, res) => res.json({ ok: true, ready: true, service: 'qrv-registry', records: demoRecords.size }));
-app.get('/readyz', (_req, res) => res.json({ ok: true, ready: true, service: 'qrv-registry', records: demoRecords.size }));
+app.get('/ready', (_req, res) => res.json({ ok: true, ready: true, service: 'qrv-registry', records: registryRecords.size }));
+app.get('/readyz', (_req, res) => res.json({ ok: true, ready: true, service: 'qrv-registry', records: registryRecords.size }));
 app.get('/version', (_req, res) => res.json({ ok: true, service: 'qrv-registry', version: VERSION, startedAt: STARTED_AT }));
 
-app.get('/records/demo', (_req, res) => {
-  res.json({ ok: true, service: 'qrv-registry', records: Array.from(demoRecords.values()) });
+app.get('/records/demo', (_req, res) => res.json({ ok: true, service: 'qrv-registry', records: Array.from(registryRecords.values()).filter((record) => record.qrvid.includes('DEMO')) }));
+app.get('/records', (_req, res) => res.json({ ok: true, service: 'qrv-registry', records: Array.from(registryRecords.values()) }));
+
+app.post('/records', (req, res) => {
+  const record = createRecord(req.body || {});
+  res.status(201).json({ ok: true, service: 'qrv-registry', record, canonicalUrl: canonicalUrl(record.qrvid) });
+});
+
+app.post('/registry/create', (req, res) => {
+  const record = createRecord(req.body || {});
+  res.status(201).json({ ok: true, service: 'qrv-registry', record, canonicalUrl: canonicalUrl(record.qrvid) });
 });
 
 app.get('/verify/:qrvid', (req, res) => {
